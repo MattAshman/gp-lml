@@ -1,4 +1,5 @@
 import os
+import sys
 import itertools
 
 import matplotlib.pyplot as plt
@@ -7,6 +8,11 @@ from tqdm import tqdm
 import numpy as np
 
 import gpytorch
+import pdb
+
+# from plot_utils import tableau20
+
+sys.path.append("../")
 from gplml.models import (
     SGPR,
     CGLB,
@@ -19,8 +25,6 @@ from gplml.models import (
     logdet_estimator_exact,
     logdet_estimator_thang,
 )
-import pdb
-from plot_utils import tableau20
 
 # note that this helper function does two different things:
 # (i) plots the observed data;
@@ -44,9 +48,12 @@ def plot(
         Xtest = torch.linspace(-3, 10, n_test)  # test inputs
         # compute predictive mean and variance
         with torch.no_grad():
-            mean, var = model(Xtest, full_cov=False, full_output_cov=False)
+            # mean, var = model(Xtest, full_cov=False, full_output_cov=False)
+            dist = model(Xtest)
+            mean, cov = dist.mean.detach(), dist.covariance_matrix.detach()
 
-        sd = var.sqrt()  # standard deviation at each input point x
+        # sd = var.sqrt()  # standard deviation at each input point x
+        sd = cov.diag().sqrt()
         plt.plot(Xtest.numpy(), mean.numpy(), "r", lw=2)  # plot the mean
         plt.fill_between(
             Xtest.numpy(),  # plot the two-sigma uncertainty about the mean
@@ -56,12 +63,15 @@ def plot(
             alpha=0.3,
         )
     if plot_inducing:
-        Xu = model.inducing_points
+        Xu = model.covar_module.inducing_points
         # compute predictive mean and variance
         with torch.no_grad():
-            mean, var = model(Xu, full_cov=False, full_output_cov=False)
+            # mean, var = model(Xu, full_cov=False, full_output_cov=False)
+            dist = model(Xu)
+            mean, cov = dist.mean.detach(), dist.covariance_matrix.detach()
 
-        sd = var.sqrt()  # standard deviation at each input point x
+        # sd = var.sqrt()  # standard deviation at each input point x
+        sd = cov.diag().sqrt()
         plt.plot(Xu.data.numpy(), mean.numpy(), "s", color="r")  # plot the mean
 
     plt.xlim(-3, 10)
@@ -79,7 +89,7 @@ data = (X, y)
 N = X.shape[0]
 
 seeds = np.arange(10)
-Ms = [2, 5, 10, 20]
+Ms = [2]
 num_steps = 5000
 terms_avg = []
 terms_exact = []
@@ -120,7 +130,7 @@ for seed in seeds:
             # )
 
             if logdet_term == "sgpr":
-                loget_estimator = logdet_estimator_sgpr
+                logdet_estimator = logdet_estimator_sgpr
             elif logdet_term == "awb":
                 logdet_estimator = logdet_estimator_awb
             elif logdet_term == "thang":
@@ -135,7 +145,7 @@ for seed in seeds:
                 model = CGLB(data, likelihood, kernel)
                 lower_bound = LowerBoundCG(model, logdet_estimator)
             elif quad_term == "exact":
-                model = GPR(data, likelihood, kernel)
+                model = SGPR(data, likelihood, kernel)
                 lower_bound = LowerBoundExact(model, logdet_estimator)
 
             # sgpr = SparseGPRegression(
@@ -148,7 +158,8 @@ for seed in seeds:
             #     noise=torch.tensor(0.1),
             # )
             # Check parameters.
-            pdb.set_trace()
+            model.train()
+            likelihood.train()
 
             optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
             terms = {
@@ -159,24 +170,27 @@ for seed in seeds:
             pbar = tqdm(range(num_steps))
             for i in pbar:
                 optimizer.zero_grad()
-                lower_bound, quad_term, logdet_term = lower_bound.forward(data)
-                loss = -lower_bound
+                lb, quad, logdet = lower_bound.forward(data)
+                loss = -lb
                 loss.backward()
                 optimizer.step()
 
-                terms["lower_bound"].append(lower_bound.item())
-                terms["quad_term"].append(quad_term.item())
-                terms["logdet_term"].append(logdet_term.item())
+                terms["lower_bound"].append(lb.item())
+                terms["quad_term"].append(quad.item())
+                terms["logdet_term"].append(logdet.item())
 
                 pbar.set_postfix(
                     {
-                        "lower_bound": lower_bound.item(),
-                        "quad_term": quad_term.item(),
-                        "logdet_term": logdet_term.item(),
+                        "lower_bound": lb.item(),
+                        "quad_term": quad.item(),
+                        "logdet_term": logdet.item(),
                     }
                 )
 
             terms_all.append(terms)
+
+            model.eval()
+            likelihood.eval()
 
             # plot the predictions from the sparse GP
             plot(
@@ -186,7 +200,7 @@ for seed in seeds:
                 plot_inducing=True,
             )
             plt.savefig(
-                "/tmp/reg1d_snelson_quad_term_%s_logdet_term_%s_M_%d_seed_%d.pdf"
+                "./tmp/reg1d_snelson_quad_term_%s_logdet_term_%s_M_%d_seed_%d.pdf"
                 % (quad_term, logdet_term, M, seed),
                 bbox_inches="tight",
                 pad_inches=0,
@@ -206,14 +220,14 @@ for j, M in enumerate(Ms):
             np.arange(num_steps) + 1,
             terms_mean["lower_bound"][j, i, :],
             label=methods[i] + ", M=%d" % M,
-            color=tableau20[i * 2],
+            # color=tableau20[i * 2],
         )
         for k in range(len(seeds)):
             plt.plot(
                 np.arange(num_steps) + 1,
                 terms_avg["lower_bound"][k, j, i, :],
                 alpha=0.1,
-                color=tableau20[i * 2],
+                # color=tableau20[i * 2],
             )
     # if j == len(Ms) - 1:
     #     plt.plot(

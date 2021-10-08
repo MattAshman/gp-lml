@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import Tuple, Union, Optional
-from collections.abs import Callable
+from collections.abc import Callable
 from abc import abstractmethod
+from functools import partial
 
 import gpytorch
 import numpy as np
@@ -95,7 +96,7 @@ class LowerBoundLML(ExactMarginalLogLikelihood):
 
         super().__init__(model.likelihood, model)
 
-        self.logdet_estimator = logdet_estimator
+        self.logdet_estimator = partial(logdet_estimator, self)
 
     @property
     def mean(self) -> gpytorch.means.Mean:
@@ -135,6 +136,7 @@ class LowerBoundLML(ExactMarginalLogLikelihood):
 
         # Estimate of Quadratic form from CGQ
         quad_term = self.quad_estimator(data, terms)
+
         lower_bound = quad_term + logdet_term + const_term
 
         # print(prof.key_averages().table(sort_by="cuda_memory_usage"))
@@ -258,7 +260,7 @@ class LowerBoundCG(LowerBoundLML):
         lower_bound = (v * (r + 0.5 * cov_v)).sum()
         upper_bound = lower_bound + 0.5 * error_bound
 
-        return lower_bound
+        return -upper_bound
 
 
 class LowerBoundSGPR(LowerBoundLML):
@@ -274,9 +276,12 @@ class LowerBoundSGPR(LowerBoundLML):
 
         trisolve = torch.triangular_solve
         c = trisolve(a_err, terms.LB, upper=False).solution / sigma
-        lower_bound = sigma_sq * err.transpose(-1, -2) @ err - c.transpose(-1, -2) @ c
+        lower_bound = (
+            -0.5 * err.transpose(-1, -2) @ err / sigma_sq
+            + 0.5 * c.transpose(-1, -2) @ c
+        )
 
-        return -lower_bound
+        return lower_bound
 
 
 class LowerBoundExact(LowerBoundLML):
@@ -290,9 +295,9 @@ class LowerBoundExact(LowerBoundLML):
         mean: Tensor = self.mean(x_data)
         err = y_data.reshape(-1, 1) - mean.reshape(-1, 1)
 
-        Lcov = torch.cholesky(cov)
+        Lcov = torch.cholesky(delazify(cov))
         tmp = torch.triangular_solve(err, Lcov, upper=False).solution
-        quad_term = tmp.transpose(-1, -2) @ tmp
+        quad_term = -0.5 * tmp.transpose(-1, -2) @ tmp
 
         return quad_term
 
@@ -448,7 +453,7 @@ def _output_dims(t: Tensor) -> Tuple[Tensor, Tensor]:
 
 
 def logdet_estimator_awb(
-    self,
+    lower_bound: LowerBoundLML,
     data: Tuple,
     terms: CommonTerms,
 ) -> Tensor:
@@ -462,9 +467,9 @@ def logdet_estimator_awb(
 
     x_data, y_data = data
     num_data, output_dim = _output_dims(y_data)
-    kernel = self.kernel
+    kernel = lower_bound.kernel
 
-    sigma_sq = self.noise
+    sigma_sq = lower_bound.noise
     kdiag = kernel(x_data, diag=True)
 
     # t / σ²
@@ -480,7 +485,7 @@ def logdet_estimator_awb(
 
 
 def logdet_estimator_thang(
-    self,
+    lower_bound: LowerBoundLML,
     data: Tuple,
     terms: CommonTerms,
 ) -> Tensor:
@@ -494,9 +499,9 @@ def logdet_estimator_thang(
 
     x_data, y_data = data
     num_data, output_dim = _output_dims(y_data)
-    kernel = self.kernel
+    kernel = lower_bound.kernel
 
-    sigma_sq = self.noise
+    sigma_sq = lower_bound.noise
     kdiag = kernel(x_data, diag=True)
 
     # AtA = Q / σ2.
@@ -516,7 +521,7 @@ def logdet_estimator_thang(
 
 
 def logdet_estimator_sgpr(
-    self,
+    lower_bound: LowerBoundLML,
     data: Tuple,
     terms: CommonTerms,
 ) -> Tensor:
@@ -530,9 +535,9 @@ def logdet_estimator_sgpr(
 
     x_data, y_data = data
     num_data, output_dim = _output_dims(y_data)
-    kernel = self.kernel
+    kernel = lower_bound.kernel
 
-    sigma_sq = self.noise
+    sigma_sq = lower_bound.noise
     kdiag = kernel(x_data, diag=True)
 
     # t / σ²
@@ -548,7 +553,7 @@ def logdet_estimator_sgpr(
 
 
 def logdet_estimator_exact(
-    self,
+    lower_bound: LowerBoundLML,
     data: Tuple,
     terms: CommonTerms,
 ) -> Tensor:
@@ -562,13 +567,13 @@ def logdet_estimator_exact(
 
     x_data, y_data = data
     num_data, output_dim = _output_dims(y_data)
-    kernel = self.kernel
+    kernel = lower_bound.kernel
 
-    sigma_sq = self.noise
+    sigma_sq = lower_bound.noise
     kxx: GPytorchLazyTensor = kernel(x_data)
     cov = kxx.add_diag(sigma_sq)
 
-    Lcov = torch.cholesky(cov)
+    Lcov = torch.cholesky(delazify(cov))
 
     logdet = -output_dim * Lcov.diagonal().log().sum()
     return logdet
